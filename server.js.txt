@@ -24,7 +24,6 @@ app.use(express.json());    // Enable parsing of JSON request bodies
 
 
 // --- Middleware to verify Firebase ID Token ---
-// This middleware will be used by routes that require authentication
 const verifyFirebaseIdToken = async (req, res, next) => {
     const idToken = req.headers.authorization?.split('Bearer ')[1];
 
@@ -43,9 +42,6 @@ const verifyFirebaseIdToken = async (req, res, next) => {
     }
 }
 
-// Import the moods router
-const moodsRouter = require('./routes/moods');
-
 // --- API Routes ---
 app.get('/api', (req, res) => {
     res.json({ message: 'Welcome to the Daylight App API!' });
@@ -53,7 +49,7 @@ app.get('/api', (req, res) => {
 
 // Example: Fetching data (no auth required for now, but will be protected later)
 app.get('/api/data', async (req, res) => {
-    // This will return current server time
+    // This will return current server time since removing Postgres
     res.json({ currentTime: new Date().toISOString() });
 });
 
@@ -94,10 +90,62 @@ app.post('/api/auth/sync', verifyFirebaseIdToken, async (req, res) => {
     }
 });
 
-// Use the moods router for all requests strating with /api/moods
-// Pass the verifyFirebaseIdToken middleware to the router directly
-// This ensures all routes defined in moodsRouter are protected
-app.use('/api/moods', verifyFirebaseIdToken, moodsRouter);
+// Endpoint to submit a mood entry
+// This endpoint now uses Firestore to save mood data
+app.post('/api/moods', verifyFirebaseIdToken, async (req, res) => {
+    const { firebaseUid } = req;    // User's Firebase UID from token verification
+    const { moodValue, notes } = req.body;  // Data sent from frontend
+
+    if (!moodValue) {
+        return res.status(400).json({ message: 'Mood value is required.' });
+    }
+
+    try {
+        const moodRef = db.collection('mood_ratings').add({
+            userId: firebaseUid,    // Link the user via their Firebase UID
+            moodValue: parseInt(moodValue), // Ensure it's an integer
+            notes: notes || '', // Optional notes
+            recordedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        res.status(201).json({
+            message: 'Mood entry added successfully.',
+            moodId: (await moodRef).id
+        });
+    
+    } catch (error) {
+        console.error('Error adding mood entry to Firestore:', error);
+        res.status(500).json({ error: 'Internal Server Error while adding mood.' });
+    }
+});
+
+// Endpoint to fetch mood entries
+app.get('/api/moods/recent', verifyFirebaseIdToken, async (req, res) => {
+    const { firebaseUid } = req;
+    const days = parseInt(req.query.days || '7');   // Fetch moods from the last N days (default 7)
+
+    const cutOffDate = new Date();
+    cutOffDate.setDate(cutOffDate.getDate() - days);
+
+    try {
+        const moodQuery = db.collection('mood_ratings')
+            .where('userId', '==', firebaseUid)
+            .where('recordedAt', '>=', cutOffDate)
+            .orderBy('recordedAt', 'desc'); // Order by newest first
+
+        const snapshot = await moodQuery.get();
+        const moods = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        }));
+
+        res.status(200).json({ moods });
+
+    } catch (error) {
+        console.error('Error fetching recent moods from Firestore:', error);
+        res.status(500).json({ error: 'Internal Server Error while fetching moods.' });
+    }
+});
 
 // Start the server
 app.listen(port, () => {
